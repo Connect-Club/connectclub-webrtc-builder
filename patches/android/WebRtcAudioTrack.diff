@@ -1,0 +1,219 @@
+diff --git a/sdk/android/src/java/org/webrtc/audio/WebRtcAudioTrack.java b/sdk/android/src/java/org/webrtc/audio/WebRtcAudioTrack.java
+index 5e1201d5ca..eeb0e8da7b 100644
+--- a/sdk/android/src/java/org/webrtc/audio/WebRtcAudioTrack.java
++++ b/sdk/android/src/java/org/webrtc/audio/WebRtcAudioTrack.java
+@@ -28,7 +28,7 @@ import org.webrtc.audio.JavaAudioDeviceModule.AudioTrackStartErrorCode;
+ import org.webrtc.audio.JavaAudioDeviceModule.AudioTrackStateCallback;
+ import org.webrtc.audio.LowLatencyAudioBufferManager;
+ 
+-class WebRtcAudioTrack {
++public class WebRtcAudioTrack {
+   private static final String TAG = "WebRtcAudioTrackExternal";
+ 
+   // Default audio data format is PCM 16 bit per sample.
+@@ -45,19 +45,6 @@ class WebRtcAudioTrack {
+   // but the wait times out afther this amount of time.
+   private static final long AUDIO_TRACK_THREAD_JOIN_TIMEOUT_MS = 2000;
+ 
+-  // By default, WebRTC creates audio tracks with a usage attribute
+-  // corresponding to voice communications, such as telephony or VoIP.
+-  private static final int DEFAULT_USAGE = getDefaultUsageAttribute();
+-
+-  private static int getDefaultUsageAttribute() {
+-    if (Build.VERSION.SDK_INT >= 21) {
+-      return AudioAttributes.USAGE_VOICE_COMMUNICATION;
+-    } else {
+-      // Not used on SDKs lower than L.
+-      return 0;
+-    }
+-  }
+-
+   // Indicates the AudioTrack has started playing audio.
+   private static final int AUDIO_TRACK_START = 0;
+ 
+@@ -82,6 +69,9 @@ class WebRtcAudioTrack {
+   private byte[] emptyBytes;
+   private boolean useLowLatency;
+   private int initialBufferSizeInFrames;
++  private static final Attrs ATTRS = Attrs.getInstance();
++  private int usageType = ATTRS.getDefaultUsage();
++  private int streamType = ATTRS.getDefaultStream();
+ 
+   private final @Nullable AudioTrackErrorCallback errorCallback;
+   private final @Nullable AudioTrackStateCallback stateCallback;
+@@ -184,7 +174,11 @@ class WebRtcAudioTrack {
+     this.errorCallback = errorCallback;
+     this.stateCallback = stateCallback;
+     this.volumeLogger = new VolumeLogger(audioManager);
+-    this.useLowLatency = useLowLatency;
++    this.useLowLatency = ATTRS.getUseLowLatency()==null
++      ? useLowLatency
++      : ATTRS.getUseLowLatency();
++    this.usageType = ATTRS.getDefaultUsage();
++    this.streamType = ATTRS.getDefaultStream();
+     Logging.d(TAG, "ctor" + WebRtcAudioUtils.getThreadInfo());
+   }
+ 
+@@ -246,7 +240,7 @@ class WebRtcAudioTrack {
+       if (useLowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+         // On API level 26 or higher, we can use a low latency mode.
+         audioTrack = createAudioTrackOnOreoOrHigher(
+-            sampleRate, channelConfig, minBufferSizeInBytes, audioAttributes);
++            sampleRate, usageType, streamType, channelConfig, minBufferSizeInBytes, audioAttributes);
+       } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+         // If we are on API level 21 or higher, it is possible to use a special AudioTrack
+         // constructor that uses AudioAttributes and AudioFormat as input. It allows us to
+@@ -254,7 +248,7 @@ class WebRtcAudioTrack {
+         // and to allow certain platforms or routing policies to use this information for more
+         // refined volume or routing decisions.
+         audioTrack = createAudioTrackOnLollipopOrHigher(
+-            sampleRate, channelConfig, minBufferSizeInBytes, audioAttributes);
++            sampleRate, usageType, streamType, channelConfig, minBufferSizeInBytes, audioAttributes);
+       } else {
+         // Use default constructor for API levels below 21.
+         audioTrack =
+@@ -352,7 +346,7 @@ class WebRtcAudioTrack {
+   private int getStreamMaxVolume() {
+     threadChecker.checkIsOnValidThread();
+     Logging.d(TAG, "getStreamMaxVolume");
+-    return audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL);
++    return audioManager.getStreamMaxVolume(streamType);
+   }
+ 
+   // Set current volume level for a phone call audio stream.
+@@ -364,7 +358,7 @@ class WebRtcAudioTrack {
+       Logging.e(TAG, "The device implements a fixed volume policy.");
+       return false;
+     }
+-    audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, volume, 0);
++    audioManager.setStreamVolume(streamType, volume, 0);
+     return true;
+   }
+ 
+@@ -379,7 +373,7 @@ class WebRtcAudioTrack {
+   private int getStreamVolume() {
+     threadChecker.checkIsOnValidThread();
+     Logging.d(TAG, "getStreamVolume");
+-    return audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
++    return audioManager.getStreamVolume(streamType);
+   }
+ 
+   @CalledByNative
+@@ -415,11 +409,14 @@ class WebRtcAudioTrack {
+     }
+   }
+ 
+-  private static AudioAttributes getAudioAttributes(@Nullable AudioAttributes overrideAttributes) {
++  private static AudioAttributes getAudioAttributes(
++      int usageType,
++      int streamType,
++      @Nullable AudioAttributes overrideAttributes) {
+     AudioAttributes.Builder attributesBuilder =
+         new AudioAttributes.Builder()
+-            .setUsage(DEFAULT_USAGE)
+-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH);
++            .setUsage(usageType)
++            .setContentType(streamType);
+ 
+     if (overrideAttributes != null) {
+       if (overrideAttributes.getUsage() != AudioAttributes.USAGE_UNKNOWN) {
+@@ -442,13 +439,18 @@ class WebRtcAudioTrack {
+   // It allows certain platforms or routing policies to use this information for more
+   // refined volume or routing decisions.
+   @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+-  private static AudioTrack createAudioTrackOnLollipopOrHigher(int sampleRateInHz,
+-      int channelConfig, int bufferSizeInBytes, @Nullable AudioAttributes overrideAttributes) {
++  private static AudioTrack createAudioTrackOnLollipopOrHigher(
++      int sampleRateInHz,
++      int usageType,
++      int streamType,
++      int channelConfig,
++      int bufferSizeInBytes,
++      @Nullable AudioAttributes overrideAttributes) {
+     Logging.d(TAG, "createAudioTrackOnLollipopOrHigher");
+     logNativeOutputSampleRate(sampleRateInHz);
+ 
+     // Create an audio track where the audio usage is for VoIP and the content type is speech.
+-    return new AudioTrack(getAudioAttributes(overrideAttributes),
++    return new AudioTrack(getAudioAttributes(usageType, streamType, overrideAttributes),
+         new AudioFormat.Builder()
+             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+             .setSampleRate(sampleRateInHz)
+@@ -463,14 +465,19 @@ class WebRtcAudioTrack {
+   // that happen in low-latency mode during the call will cause the AEC to perform worse.
+   // The behavior of the low-latency mode may be device dependent, use at your own risk.
+   @TargetApi(Build.VERSION_CODES.O)
+-  private static AudioTrack createAudioTrackOnOreoOrHigher(int sampleRateInHz, int channelConfig,
+-      int bufferSizeInBytes, @Nullable AudioAttributes overrideAttributes) {
++  private static AudioTrack createAudioTrackOnOreoOrHigher(
++      int sampleRateInHz,
++      int usageType,
++      int streamType,
++      int channelConfig,
++      int bufferSizeInBytes, 
++      @Nullable AudioAttributes overrideAttributes) {
+     Logging.d(TAG, "createAudioTrackOnOreoOrHigher");
+     logNativeOutputSampleRate(sampleRateInHz);
+ 
+     // Create an audio track where the audio usage is for VoIP and the content type is speech.
+     return new AudioTrack.Builder()
+-        .setAudioAttributes(getAudioAttributes(overrideAttributes))
++        .setAudioAttributes(getAudioAttributes(usageType, streamType, overrideAttributes))
+         .setAudioFormat(new AudioFormat.Builder()
+                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                             .setSampleRate(sampleRateInHz)
+@@ -612,4 +619,54 @@ class WebRtcAudioTrack {
+       }
+     }
+   }
++
++  public static class Attrs {
++    private static Attrs sInstance;
++
++    private int usage = AudioAttributes.USAGE_VOICE_COMMUNICATION;
++    private int stream = AudioManager.STREAM_VOICE_CALL;
++    private Boolean useLowLatency;
++
++    public static Attrs getInstance() {
++      if (sInstance != null) return sInstance;
++      synchronized (Attrs.class) {
++        if (sInstance != null) return sInstance;
++        sInstance = new Attrs();
++        return sInstance;
++      }
++    }
++
++    protected Attrs() {
++    }
++
++    /**
++     * Corresponds to {@link AudioAttributes} usage constant
++     */
++    public void setDefaultUsage(int usage) {
++      this.usage = usage;
++    }
++
++    public int getDefaultUsage() {
++      return usage;
++    }
++
++    /**
++     * Corresponds to {@link AudioManager} stream constant
++     */
++    public int getDefaultStream() {
++      return stream;
++    }
++
++    public void setDefaultStream(int stream) {
++      this.stream = stream;
++    }
++
++    public Boolean getUseLowLatency() {
++      return useLowLatency;
++    }
++
++    public void setUseLowLatency(Boolean useLowLatency) {
++      this.useLowLatency = useLowLatency;
++    }
++  }
+ }

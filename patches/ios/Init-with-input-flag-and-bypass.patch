@@ -1,0 +1,694 @@
+From 592a6c88252e7a28cfeba785ed2b544fcd4a8769 Mon Sep 17 00:00:00 2001
+From: Taras Minin <taras.minin@connect.club>
+Date: Thu, 11 Nov 2021 16:24:06 +0300
+Subject: [PATCH] qwer
+
+---
+ modules/audio_device/audio_device_impl.cc     |   2 +-
+ .../RTCPeerConnectionFactory+Native.h         |   6 +-
+ .../peerconnection/RTCPeerConnectionFactory.h |   6 +-
+ .../RTCPeerConnectionFactory.mm               |  17 ++-
+ sdk/objc/components/audio/RTCAudioSession.h   |   4 +
+ sdk/objc/components/audio/RTCAudioSession.mm  |  28 ++++
+ .../RTCNativeAudioSessionDelegateAdapter.mm   |   5 +
+ sdk/objc/native/api/audio_device_module.h     |   2 +-
+ sdk/objc/native/api/audio_device_module.mm    |   4 +-
+ sdk/objc/native/src/audio/audio_device_ios.h  |   7 +-
+ sdk/objc/native/src/audio/audio_device_ios.mm |  49 +++++-
+ .../src/audio/audio_device_module_ios.h       |   5 +-
+ .../src/audio/audio_device_module_ios.mm      |   7 +-
+ .../native/src/audio/audio_session_observer.h |   2 +
+ .../src/audio/voice_processing_audio_unit.h   |  12 +-
+ .../src/audio/voice_processing_audio_unit.mm  | 144 +++++++++++-------
+ 16 files changed, 222 insertions(+), 78 deletions(-)
+
+diff --git a/modules/audio_device/audio_device_impl.cc b/modules/audio_device/audio_device_impl.cc
+index 84460ff83f..dff84a2c66 100644
+--- a/modules/audio_device/audio_device_impl.cc
++++ b/modules/audio_device/audio_device_impl.cc
+@@ -280,7 +280,7 @@ int32_t AudioDeviceModuleImpl::CreatePlatformSpecificObjects() {
+ #if defined(WEBRTC_IOS)
+   if (audio_layer == kPlatformDefaultAudio) {
+     audio_device_.reset(
+-        new ios_adm::AudioDeviceIOS(/*bypass_voice_processing=*/false));
++        new ios_adm::AudioDeviceIOS(/*bypass_voice_processing=*/false, /*needAGC=*/true, /*needAEC=*/true, /*input_enabled=*/true));
+     RTC_LOG(INFO) << "iPhone Audio APIs will be utilized.";
+   }
+ // END #if defined(WEBRTC_IOS)
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory+Native.h b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory+Native.h
+index f361b9f0ea..c5b66e6400 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory+Native.h
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory+Native.h
+@@ -69,7 +69,11 @@ NS_ASSUME_NONNULL_BEGIN
+ 
+ - (instancetype)
+     initWithEncoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+-            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory;
++            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
++        bypass_voice_processing:(BOOL)bypass_voice_processing
++        needAGC:(BOOL)needAGC
++        needAEC:(BOOL)needAEC
++        inputEnabled:(BOOL)inputEnabled;
+ 
+ /** Initialize an RTCPeerConnection with a configuration, constraints, and
+  *  dependencies.
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+index 2b0489885f..46bdf1d78e 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.h
+@@ -39,7 +39,11 @@ RTC_OBJC_EXPORT
+ /* Initialize object with injectable video encoder/decoder factories */
+ - (instancetype)
+     initWithEncoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+-            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory;
++            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
++    bypass_voice_processing:(BOOL)bypass_voice_processing
++    needAGC:(BOOL)needAGC
++    needAEC:(BOOL)needAEC
++    inputEnabled:(BOOL)inputEnabled;
+ 
+ /** Initialize an RTCAudioSource with constraints. */
+ - (RTC_OBJC_TYPE(RTCAudioSource) *)audioSourceWithConstraints:
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+index 2f324f7289..ba107ab757 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -67,9 +67,9 @@ @implementation RTC_OBJC_TYPE (RTCPeerConnectionFactory) {
+ 
+ @synthesize nativeFactory = _nativeFactory;
+ 
+-- (rtc::scoped_refptr<webrtc::AudioDeviceModule>)audioDeviceModule {
++- (rtc::scoped_refptr<webrtc::AudioDeviceModule>)audioDeviceModule: (BOOL)bypass agc:(BOOL)agc aec:(BOOL)aec input:(BOOL)input {
+ #if defined(WEBRTC_IOS)
+-  return webrtc::CreateAudioDeviceModule();
++  return webrtc::CreateAudioDeviceModule(bypass, agc, aec, input);
+ #else
+   return nullptr;
+ #endif
+@@ -86,14 +86,18 @@ - (instancetype)init {
+                                             RTCVideoEncoderFactoryH264) alloc] init])
+               nativeVideoDecoderFactory:webrtc::ObjCToNativeVideoDecoderFactory([[RTC_OBJC_TYPE(
+                                             RTCVideoDecoderFactoryH264) alloc] init])
+-                      audioDeviceModule:[self audioDeviceModule]
++                      audioDeviceModule:[self audioDeviceModule:NO agc:YES aec:YES input:YES]
+                   audioProcessingModule:nullptr];
+ #endif
+ }
+ 
+ - (instancetype)
+     initWithEncoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+-            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory {
++            decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
++            bypass_voice_processing:(BOOL)bypass_voice_processing
++            needAGC:(BOOL)needAGC
++            needAEC:(BOOL)needAEC
++            inputEnabled:(BOOL)inputEnabled {
+ #ifdef HAVE_NO_MEDIA
+   return [self initWithNoMedia];
+ #else
+@@ -109,7 +113,10 @@ - (instancetype)init {
+                        nativeAudioDecoderFactory:webrtc::CreateBuiltinAudioDecoderFactory()
+                        nativeVideoEncoderFactory:std::move(native_encoder_factory)
+                        nativeVideoDecoderFactory:std::move(native_decoder_factory)
+-                               audioDeviceModule:[self audioDeviceModule]
++                               audioDeviceModule:[self audioDeviceModule: bypass_voice_processing
++                                                                     agc: needAGC
++                                                                     aec: needAEC
++                                                                   input: inputEnabled]
+                            audioProcessingModule:nullptr];
+ #endif
+ }
+diff --git a/sdk/objc/components/audio/RTCAudioSession.h b/sdk/objc/components/audio/RTCAudioSession.h
+index f917e327a4..f08e00b0d6 100644
+--- a/sdk/objc/components/audio/RTCAudioSession.h
++++ b/sdk/objc/components/audio/RTCAudioSession.h
+@@ -65,6 +65,9 @@ RTC_OBJC_EXPORT
+ - (void)audioSession:(RTC_OBJC_TYPE(RTCAudioSession) *)session
+     didChangeCanPlayOrRecord:(BOOL)canPlayOrRecord;
+ 
++- (void)audioSession:(RTC_OBJC_TYPE(RTCAudioSession) *)session
++    didChangeBypassVoice:(BOOL)bypassVoice;
++
+ /** Called on a WebRTC thread when the audio device is notified to begin
+  *  playback or recording.
+  */
+@@ -160,6 +163,7 @@ RTC_OBJC_EXPORT
+  *  we are able to prevent the abrupt cutoff.
+  */
+ @property(nonatomic, assign) BOOL isAudioEnabled;
++@property(nonatomic, assign) BOOL bypassVoice;
+ 
+ // Proxy properties.
+ @property(readonly) NSString *category;
+diff --git a/sdk/objc/components/audio/RTCAudioSession.mm b/sdk/objc/components/audio/RTCAudioSession.mm
+index 057f62cf27..5e8534070f 100644
+--- a/sdk/objc/components/audio/RTCAudioSession.mm
++++ b/sdk/objc/components/audio/RTCAudioSession.mm
+@@ -44,6 +44,7 @@ @implementation RTC_OBJC_TYPE (RTCAudioSession) {
+   BOOL _isAudioEnabled;
+   BOOL _canPlayOrRecord;
+   BOOL _isInterrupted;
++  BOOL _bypassVoice;
+ }
+ 
+ @synthesize session = _session;
+@@ -182,6 +183,23 @@ - (BOOL)isAudioEnabled {
+   }
+ }
+ 
++- (void)setBypassVoice:(BOOL)bypassVoice {
++  RTCLog(@"setBypassVoice %d", bypassVoice);
++  @synchronized(self) {
++    if (_bypassVoice == bypassVoice) {
++      return;
++    }
++    _bypassVoice = bypassVoice;
++  }
++  [self notifyDidChangeBypassVoice:bypassVoice];
++}
++
++- (BOOL)bypassVoice {
++  @synchronized(self) {
++    return _bypassVoice;
++  }
++}
++
+ - (void)setIgnoresPreferredAttributeConfigurationErrors:
+     (BOOL)ignoresPreferredAttributeConfigurationErrors {
+   @synchronized(self) {
+@@ -844,6 +862,16 @@ - (void)notifyMediaServicesWereReset {
+   }
+ }
+ 
++- (void)notifyDidChangeBypassVoice:(BOOL)bypassVoice {
++  RTCLog(@"Audio session notifyDidChangeBypassVoice %d", bypassVoice);
++  for (auto delegate : self.delegates) {
++    SEL sel = @selector(audioSession:didChangeBypassVoice:);
++    if ([delegate respondsToSelector:sel]) {
++      [delegate audioSession:self didChangeBypassVoice:bypassVoice];
++    }
++  }
++}
++
+ - (void)notifyDidChangeCanPlayOrRecord:(BOOL)canPlayOrRecord {
+   for (auto delegate : self.delegates) {
+     SEL sel = @selector(audioSession:didChangeCanPlayOrRecord:);
+diff --git a/sdk/objc/components/audio/RTCNativeAudioSessionDelegateAdapter.mm b/sdk/objc/components/audio/RTCNativeAudioSessionDelegateAdapter.mm
+index daddf314a4..bfb0187a95 100644
+--- a/sdk/objc/components/audio/RTCNativeAudioSessionDelegateAdapter.mm
++++ b/sdk/objc/components/audio/RTCNativeAudioSessionDelegateAdapter.mm
+@@ -75,6 +75,11 @@ - (void)audioSession:(RTC_OBJC_TYPE(RTCAudioSession) *)session
+   _observer->OnCanPlayOrRecordChange(canPlayOrRecord);
+ }
+ 
++- (void)audioSession:(RTC_OBJC_TYPE(RTCAudioSession) *)session
++    didChangeBypassVoice:(BOOL)bypassVoice {
++  _observer->OnBypassVoiceChange(bypassVoice);
++}
++
+ - (void)audioSessionDidStartPlayOrRecord:(RTC_OBJC_TYPE(RTCAudioSession) *)session {
+ }
+ 
+diff --git a/sdk/objc/native/api/audio_device_module.h b/sdk/objc/native/api/audio_device_module.h
+index 8925f307a3..9dcac68244 100644
+--- a/sdk/objc/native/api/audio_device_module.h
++++ b/sdk/objc/native/api/audio_device_module.h
+@@ -23,7 +23,7 @@ namespace webrtc {
+ // consequences for the audio path in the device. It is not advisable to use in
+ // most scenarios.
+ rtc::scoped_refptr<AudioDeviceModule> CreateAudioDeviceModule(
+-    bool bypass_voice_processing = false);
++    bool bypass_voice_processing = false, bool needAGC = true, bool needAEC = true, bool input_enabled = true);
+ 
+ }  // namespace webrtc
+ 
+diff --git a/sdk/objc/native/api/audio_device_module.mm b/sdk/objc/native/api/audio_device_module.mm
+index dd95775204..e1631b3795 100644
+--- a/sdk/objc/native/api/audio_device_module.mm
++++ b/sdk/objc/native/api/audio_device_module.mm
+@@ -17,10 +17,10 @@
+ 
+ namespace webrtc {
+ 
+-rtc::scoped_refptr<AudioDeviceModule> CreateAudioDeviceModule(bool bypass_voice_processing) {
++rtc::scoped_refptr<AudioDeviceModule> CreateAudioDeviceModule(bool bypass_voice_processing, bool needAGC, bool needAEC, bool input_enabled) {
+   RTC_DLOG(INFO) << __FUNCTION__;
+ #if defined(WEBRTC_IOS)
+-  return new rtc::RefCountedObject<ios_adm::AudioDeviceModuleIOS>(bypass_voice_processing);
++  return new rtc::RefCountedObject<ios_adm::AudioDeviceModuleIOS>(bypass_voice_processing, needAGC, needAEC, input_enabled);
+ #else
+   RTC_LOG(LERROR)
+       << "current platform is not supported => this module will self destruct!";
+diff --git a/sdk/objc/native/src/audio/audio_device_ios.h b/sdk/objc/native/src/audio/audio_device_ios.h
+index a57e719eab..224e9c2c53 100644
+--- a/sdk/objc/native/src/audio/audio_device_ios.h
++++ b/sdk/objc/native/src/audio/audio_device_ios.h
+@@ -48,7 +48,7 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
+                        public VoiceProcessingAudioUnitObserver,
+                        public rtc::MessageHandler {
+  public:
+-  explicit AudioDeviceIOS(bool bypass_voice_processing);
++  explicit AudioDeviceIOS(bool bypass_voice_processing, bool enable_agc, bool enable_aec, bool input_enabled);
+   ~AudioDeviceIOS() override;
+ 
+   void AttachAudioBuffer(AudioDeviceBuffer* audioBuffer) override;
+@@ -144,6 +144,7 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
+   void OnInterruptionEnd() override;
+   void OnValidRouteChange() override;
+   void OnCanPlayOrRecordChange(bool can_play_or_record) override;
++  void OnBypassVoiceChange(bool bypass_voice) override;
+   void OnChangedOutputVolume() override;
+ 
+   // VoiceProcessingAudioUnitObserver methods.
+@@ -169,6 +170,7 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
+   void HandleInterruptionEnd();
+   void HandleValidRouteChange();
+   void HandleCanPlayOrRecordChange(bool can_play_or_record);
++  void HandleBypassVoiceChange(bool bypass_voice);
+   void HandleSampleRateChange(float sample_rate);
+   void HandlePlayoutGlitchDetected();
+   void HandleOutputVolumeChange();
+@@ -211,6 +213,9 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
+ 
+   // Determines whether voice processing should be enabled or disabled.
+   const bool bypass_voice_processing_;
++  const bool enable_agc_;
++  const bool enable_aec_;
++  const bool input_enabled_;
+ 
+   // Ensures that methods are called from the same thread as this object is
+   // created on.
+diff --git a/sdk/objc/native/src/audio/audio_device_ios.mm b/sdk/objc/native/src/audio/audio_device_ios.mm
+index f51714ce1d..f81f3b263e 100644
+--- a/sdk/objc/native/src/audio/audio_device_ios.mm
++++ b/sdk/objc/native/src/audio/audio_device_ios.mm
+@@ -66,6 +66,7 @@
+   kMessageTypeInterruptionEnd,
+   kMessageTypeValidRouteChange,
+   kMessageTypeCanPlayOrRecordChange,
++  kMessageTypeBypassVoiceChange,
+   kMessageTypePlayoutGlitchDetected,
+   kMessageOutputVolumeChange,
+ };
+@@ -99,8 +100,11 @@ static void LogDeviceInfo() {
+ }
+ #endif  // !defined(NDEBUG)
+ 
+-AudioDeviceIOS::AudioDeviceIOS(bool bypass_voice_processing)
++AudioDeviceIOS::AudioDeviceIOS(bool bypass_voice_processing, bool enable_agc, bool enable_aec, bool input_enabled)
+     : bypass_voice_processing_(bypass_voice_processing),
++      enable_agc_(enable_agc),
++      enable_aec_(enable_aec),
++      input_enabled_(input_enabled),
+       audio_device_buffer_(nullptr),
+       audio_unit_(nullptr),
+       recording_(0),
+@@ -362,6 +366,14 @@ static void LogDeviceInfo() {
+                 new rtc::TypedMessageData<bool>(can_play_or_record));
+ }
+ 
++void AudioDeviceIOS::OnBypassVoiceChange(bool bypass_voice) {
++  RTC_DCHECK(thread_);
++  thread_->Post(RTC_FROM_HERE,
++                this,
++                kMessageTypeBypassVoiceChange,
++                new rtc::TypedMessageData<bool>(bypass_voice));
++}
++
+ void AudioDeviceIOS::OnChangedOutputVolume() {
+   RTC_DCHECK(thread_);
+   thread_->Post(RTC_FROM_HERE, this, kMessageOutputVolumeChange);
+@@ -491,6 +503,12 @@ static void LogDeviceInfo() {
+       delete data;
+       break;
+     }
++    case kMessageTypeBypassVoiceChange: {
++      rtc::TypedMessageData<bool>* data = static_cast<rtc::TypedMessageData<bool>*>(msg->pdata);
++      HandleBypassVoiceChange(data->data());
++      delete data;
++      break;
++    }
+     case kMessageTypePlayoutGlitchDetected:
+       HandlePlayoutGlitchDetected();
+       break;
+@@ -548,6 +566,33 @@ static void LogDeviceInfo() {
+   UpdateAudioUnit(can_play_or_record);
+ }
+ 
++void AudioDeviceIOS::HandleBypassVoiceChange(bool bypass_voice) {
++  RTCLog(@"Handling BypassVoiceChange change to: %d", bypass_voice);
++  audio_unit_->UpdateBypassState(bypass_voice);
++
++  RTCLog(@"Stopping and uninitializing audio unit to adjust buffers.");
++  bool restart_audio_unit = false;
++  if (audio_unit_->GetState() == VoiceProcessingAudioUnit::kStarted) {
++    audio_unit_->Stop();
++    restart_audio_unit = true;
++    PrepareForNewStart();
++  }
++  if (audio_unit_->GetState() == VoiceProcessingAudioUnit::kInitialized) {
++    audio_unit_->Uninitialize();
++  }
++  RTC_OBJC_TYPE(RTCAudioSession)* session = [RTC_OBJC_TYPE(RTCAudioSession) sharedInstance];
++  if (!audio_unit_->Initialize(session.sampleRate)) {
++    RTCLogError(@"Failed to HandleBypassVoiceChange");
++    return;
++  }
++
++  // Restart the audio unit if it was already running.
++  if (restart_audio_unit && !audio_unit_->Start()) {
++    RTCLogError(@"Failed to HandleBypassVoiceChange");
++    return;
++  }
++}
++
+ void AudioDeviceIOS::HandleSampleRateChange(float sample_rate) {
+   RTC_DCHECK_RUN_ON(&thread_checker_);
+   RTCLog(@"Handling sample rate change to %f.", sample_rate);
+@@ -731,7 +776,7 @@ static void LogDeviceInfo() {
+ bool AudioDeviceIOS::CreateAudioUnit() {
+   RTC_DCHECK(!audio_unit_);
+ 
+-  audio_unit_.reset(new VoiceProcessingAudioUnit(bypass_voice_processing_, this));
++  audio_unit_.reset(new VoiceProcessingAudioUnit(bypass_voice_processing_, this, enable_agc_, enable_aec_, input_enabled_));
+   if (!audio_unit_->Init()) {
+     audio_unit_.reset();
+     return false;
+diff --git a/sdk/objc/native/src/audio/audio_device_module_ios.h b/sdk/objc/native/src/audio/audio_device_module_ios.h
+index 9bcf114e32..82622bcef2 100644
+--- a/sdk/objc/native/src/audio/audio_device_module_ios.h
++++ b/sdk/objc/native/src/audio/audio_device_module_ios.h
+@@ -30,7 +30,7 @@ class AudioDeviceModuleIOS : public AudioDeviceModule {
+  public:
+   int32_t AttachAudioBuffer();
+ 
+-  explicit AudioDeviceModuleIOS(bool bypass_voice_processing);
++  explicit AudioDeviceModuleIOS(bool bypass_voice_processing, bool needAGC, bool needAEC, bool input_enabled);
+   ~AudioDeviceModuleIOS() override;
+ 
+   // Retrieve the currently utilized audio layer
+@@ -132,6 +132,9 @@ class AudioDeviceModuleIOS : public AudioDeviceModule {
+ #endif  // WEBRTC_IOS
+  private:
+   const bool bypass_voice_processing_;
++  const bool enable_agc_;
++  const bool enable_aec_;
++  const bool input_enabled_;
+   bool initialized_ = false;
+   const std::unique_ptr<TaskQueueFactory> task_queue_factory_;
+   std::unique_ptr<AudioDeviceIOS> audio_device_;
+diff --git a/sdk/objc/native/src/audio/audio_device_module_ios.mm b/sdk/objc/native/src/audio/audio_device_module_ios.mm
+index 859442dc9e..f7e8573db0 100644
+--- a/sdk/objc/native/src/audio/audio_device_module_ios.mm
++++ b/sdk/objc/native/src/audio/audio_device_module_ios.mm
+@@ -40,8 +40,11 @@
+ namespace webrtc {
+ namespace ios_adm {
+ 
+-AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing)
++AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing, bool needAGC, bool needAEC, bool input_enabled)
+     : bypass_voice_processing_(bypass_voice_processing),
++      enable_agc_(needAGC),
++      enable_aec_(needAEC),
++      input_enabled_(input_enabled),
+       task_queue_factory_(CreateDefaultTaskQueueFactory()) {
+   RTC_LOG(INFO) << "current platform is IOS";
+   RTC_LOG(INFO) << "iPhone Audio APIs will be utilized.";
+@@ -73,7 +76,7 @@
+       return 0;
+ 
+     audio_device_buffer_.reset(new webrtc::AudioDeviceBuffer(task_queue_factory_.get()));
+-    audio_device_.reset(new ios_adm::AudioDeviceIOS(bypass_voice_processing_));
++    audio_device_.reset(new ios_adm::AudioDeviceIOS(bypass_voice_processing_, enable_agc_, enable_aec_, input_enabled_));
+     RTC_CHECK(audio_device_);
+ 
+     this->AttachAudioBuffer();
+diff --git a/sdk/objc/native/src/audio/audio_session_observer.h b/sdk/objc/native/src/audio/audio_session_observer.h
+index f7c44c8184..082bc7c869 100644
+--- a/sdk/objc/native/src/audio/audio_session_observer.h
++++ b/sdk/objc/native/src/audio/audio_session_observer.h
+@@ -30,6 +30,8 @@ class AudioSessionObserver {
+   // Called when the ability to play or record changes.
+   virtual void OnCanPlayOrRecordChange(bool can_play_or_record) = 0;
+ 
++  virtual void OnBypassVoiceChange(bool bypass_voice) = 0;
++
+   virtual void OnChangedOutputVolume() = 0;
+ 
+  protected:
+diff --git a/sdk/objc/native/src/audio/voice_processing_audio_unit.h b/sdk/objc/native/src/audio/voice_processing_audio_unit.h
+index 72e29c0d67..5daeb4de91 100644
+--- a/sdk/objc/native/src/audio/voice_processing_audio_unit.h
++++ b/sdk/objc/native/src/audio/voice_processing_audio_unit.h
+@@ -47,7 +47,10 @@ class VoiceProcessingAudioUnitObserver {
+ class VoiceProcessingAudioUnit {
+  public:
+   VoiceProcessingAudioUnit(bool bypass_voice_processing,
+-                           VoiceProcessingAudioUnitObserver* observer);
++                           VoiceProcessingAudioUnitObserver* observer,
++                           bool enable_agc,
++                           bool enable_aec,
++                           bool input_enabled);
+   ~VoiceProcessingAudioUnit();
+ 
+   // TODO(tkchin): enum for state and state checking.
+@@ -83,6 +86,8 @@ class VoiceProcessingAudioUnit {
+   // Stops the underlying audio unit.
+   bool Stop();
+ 
++  bool UpdateBypassState(bool bypass);
++
+   // Uninitializes the underlying audio unit.
+   bool Uninitialize();
+ 
+@@ -130,10 +135,13 @@ class VoiceProcessingAudioUnit {
+   // Deletes the underlying audio unit.
+   void DisposeAudioUnit();
+ 
+-  const bool bypass_voice_processing_;
++  bool bypass_voice_processing_;
+   VoiceProcessingAudioUnitObserver* observer_;
+   AudioUnit vpio_unit_;
+   VoiceProcessingAudioUnit::State state_;
++  bool input_enabled_;
++  bool enable_agc_;
++  bool enable_aec_;
+ };
+ }  // namespace ios_adm
+ }  // namespace webrtc
+diff --git a/sdk/objc/native/src/audio/voice_processing_audio_unit.mm b/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
+index 2325b2ed2e..0a6116f729 100644
+--- a/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
++++ b/sdk/objc/native/src/audio/voice_processing_audio_unit.mm
+@@ -73,11 +73,17 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+ }
+ 
+ VoiceProcessingAudioUnit::VoiceProcessingAudioUnit(bool bypass_voice_processing,
+-                                                   VoiceProcessingAudioUnitObserver* observer)
++                                                   VoiceProcessingAudioUnitObserver* observer,
++                                                   bool enable_agc,
++                                                   bool enable_aec,
++                                                   bool input_enabled)
+     : bypass_voice_processing_(bypass_voice_processing),
+       observer_(observer),
+       vpio_unit_(nullptr),
+-      state_(kInitRequired) {
++      state_(kInitRequired),
++      input_enabled_(input_enabled),
++      enable_agc_(enable_agc),
++      enable_aec_(enable_aec) {
+   RTC_DCHECK(observer);
+ }
+ 
+@@ -94,7 +100,13 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+   // I/O audio unit.
+   AudioComponentDescription vpio_unit_description;
+   vpio_unit_description.componentType = kAudioUnitType_Output;
+-  vpio_unit_description.componentSubType = kAudioUnitSubType_VoiceProcessingIO;
++  if (enable_aec_) {
++      RTCLog(@"Initializing audio unit VoiceProcessing");
++      vpio_unit_description.componentSubType = kAudioUnitSubType_VoiceProcessingIO;
++  } else {
++      RTCLog(@"Initializing audio unit RemoteIO");
++      vpio_unit_description.componentSubType = kAudioUnitSubType_RemoteIO;
++  }
+   vpio_unit_description.componentManufacturer = kAudioUnitManufacturer_Apple;
+   vpio_unit_description.componentFlags = 0;
+   vpio_unit_description.componentFlagsMask = 0;
+@@ -112,19 +124,6 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+     return false;
+   }
+ 
+-  // Enable input on the input scope of the input element.
+-  UInt32 enable_input = 1;
+-  result = AudioUnitSetProperty(vpio_unit_, kAudioOutputUnitProperty_EnableIO,
+-                                kAudioUnitScope_Input, kInputBus, &enable_input,
+-                                sizeof(enable_input));
+-  if (result != noErr) {
+-    DisposeAudioUnit();
+-    RTCLogError(@"Failed to enable input on input scope of input element. "
+-                 "Error=%ld.",
+-                (long)result);
+-    return false;
+-  }
+-
+   // Enable output on the output scope of the output element.
+   UInt32 enable_output = 1;
+   result = AudioUnitSetProperty(vpio_unit_, kAudioOutputUnitProperty_EnableIO,
+@@ -227,49 +226,43 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+     return false;
+   }
+ 
+-  // Initialize the Voice Processing I/O unit instance.
+-  // Calls to AudioUnitInitialize() can fail if called back-to-back on
+-  // different ADM instances. The error message in this case is -66635 which is
+-  // undocumented. Tests have shown that calling AudioUnitInitialize a second
+-  // time, after a short sleep, avoids this issue.
+-  // See webrtc:5166 for details.
+-  int failed_initalize_attempts = 0;
+-  result = AudioUnitInitialize(vpio_unit_);
+-  while (result != noErr) {
+-    RTCLogError(@"Failed to initialize the Voice Processing I/O unit. "
+-                 "Error=%ld.",
+-                (long)result);
+-    ++failed_initalize_attempts;
+-    if (failed_initalize_attempts == kMaxNumberOfAudioUnitInitializeAttempts) {
+-      // Max number of initialization attempts exceeded, hence abort.
+-      RTCLogError(@"Too many initialization attempts.");
+-      return false;
+-    }
+-    RTCLog(@"Pause 100ms and try audio unit initialization again...");
+-    [NSThread sleepForTimeInterval:0.1f];
+-    result = AudioUnitInitialize(vpio_unit_);
++  RTCLog(@"isMicEnabled create input %d", input_enabled_);
++  // Enable input on the input scope of the input element.
++  UInt32 enable_input;
++  if (input_enabled_) {
++    enable_input = 1;
++  } else {
++    enable_input = 0;
+   }
+-  if (result == noErr) {
+-    RTCLog(@"Voice Processing I/O unit is now initialized.");
++  result = AudioUnitSetProperty(vpio_unit_, kAudioOutputUnitProperty_EnableIO,
++                                kAudioUnitScope_Input, kInputBus, &enable_input,
++                                sizeof(enable_input));
++  if (result != noErr) {
++    DisposeAudioUnit();
++    RTCLogError(@"Failed to enable input on input scope of input element. "
++                "Error=%ld.",
++                (long)result);
++    return false;
+   }
+ 
+-  if (bypass_voice_processing_) {
+-    // Attempt to disable builtin voice processing.
+-    UInt32 toggle = 1;
+-    result = AudioUnitSetProperty(vpio_unit_,
+-                                  kAUVoiceIOProperty_BypassVoiceProcessing,
+-                                  kAudioUnitScope_Global,
+-                                  kInputBus,
+-                                  &toggle,
+-                                  sizeof(toggle));
+-    if (result == noErr) {
+-      RTCLog(@"Successfully bypassed voice processing.");
+-    } else {
+-      RTCLogError(@"Failed to bypass voice processing. Error=%ld.", (long)result);
++    RTCLog(@"bypass create input %d", bypass_voice_processing_);
++    if (bypass_voice_processing_) {
++      // Attempt to disable builtin voice processing.
++      UInt32 toggle = 1;
++      result = AudioUnitSetProperty(vpio_unit_,
++                                    kAUVoiceIOProperty_BypassVoiceProcessing,
++                                    kAudioUnitScope_Global,
++                                    kInputBus,
++                                    &toggle,
++                                    sizeof(toggle));
++      if (result == noErr) {
++        RTCLog(@"Successfully bypassed voice processing.");
++      } else {
++        RTCLogError(@"Failed to bypass voice processing. Error=%ld.", (long)result);
++      }
++      state_ = kInitialized;
++      return true;
+     }
+-    state_ = kInitialized;
+-    return true;
+-  }
+ 
+   // AGC should be enabled by default for Voice Processing I/O units but it is
+   // checked below and enabled explicitly if needed. This scheme is used
+@@ -288,19 +281,20 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+     // converted into a postive value to match the UMA APIs.
+     RTC_HISTOGRAM_COUNTS_SPARSE_100000(
+         "WebRTC.Audio.GetAGCStateErrorCode1", (-1) * result);
+-  } else if (agc_is_enabled) {
++  } else if (agc_is_enabled == enable_agc_) {
+     // Remember that the AGC was enabled by default. Will be used in UMA.
+-    agc_was_enabled_by_default = 1;
++    agc_was_enabled_by_default = agc_is_enabled;
++      RTCLog(@"No need to change AGC. Flag - %d", agc_is_enabled);
+   } else {
+     // AGC was initially disabled => try to enable it explicitly.
+-    UInt32 enable_agc = 1;
++    UInt32 enable_agc = enable_agc_;
+     result =
+         AudioUnitSetProperty(vpio_unit_,
+                              kAUVoiceIOProperty_VoiceProcessingEnableAGC,
+                              kAudioUnitScope_Global, kInputBus, &enable_agc,
+                              sizeof(enable_agc));
+     if (result != noErr) {
+-      RTCLogError(@"Failed to enable the built-in AGC. "
++      RTCLogError(@"Failed to switch the built-in AGC. "
+                    "Error=%ld.",
+                   (long)result);
+       RTC_HISTOGRAM_COUNTS_SPARSE_100000(
+@@ -328,6 +322,32 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+   RTCLog(@"WebRTC.Audio.BuiltInAGCIsEnabled: %u",
+          static_cast<unsigned int>(agc_is_enabled));
+ 
++    // Initialize the Voice Processing I/O unit instance.
++    // Calls to AudioUnitInitialize() can fail if called back-to-back on
++    // different ADM instances. The error message in this case is -66635 which is
++    // undocumented. Tests have shown that calling AudioUnitInitialize a second
++    // time, after a short sleep, avoids this issue.
++    // See webrtc:5166 for details.
++    int failed_initalize_attempts = 0;
++    result = AudioUnitInitialize(vpio_unit_);
++    while (result != noErr) {
++      RTCLogError(@"Failed to initialize the Voice Processing I/O unit. "
++                   "Error=%ld.",
++                  (long)result);
++      ++failed_initalize_attempts;
++      if (failed_initalize_attempts == kMaxNumberOfAudioUnitInitializeAttempts) {
++        // Max number of initialization attempts exceeded, hence abort.
++        RTCLogError(@"Too many initialization attempts.");
++        return false;
++      }
++      RTCLog(@"Pause 100ms and try audio unit initialization again...");
++      [NSThread sleepForTimeInterval:0.1f];
++      result = AudioUnitInitialize(vpio_unit_);
++    }
++    if (result == noErr) {
++      RTCLog(@"Voice Processing I/O unit is now initialized.");
++    }
++
+   state_ = kInitialized;
+   return true;
+ }
+@@ -363,6 +383,12 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
+   return true;
+ }
+ 
++bool VoiceProcessingAudioUnit::UpdateBypassState(bool bypass) {
++  RTCLog(@"UpdateBypassState");
++  bypass_voice_processing_ = bypass;
++  return true;
++}
++
+ bool VoiceProcessingAudioUnit::Uninitialize() {
+   RTC_DCHECK_GE(state_, kUninitialized);
+   RTCLog(@"Unintializing audio unit.");
+-- 
+2.30.1 (Apple Git-130)
+

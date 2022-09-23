@@ -1,0 +1,28 @@
+# syntax = docker/dockerfile:experimental
+FROM ubuntu:20.04
+
+ARG PACKAGE_NAME=android
+
+ENV SOURCE_DIR "/root/_source/$PACKAGE_NAME"
+
+COPY scripts/apt_install_x86_64.sh /root/scripts/
+RUN /root/scripts/apt_install_x86_64.sh \
+  && sudo apt-get install -y openjdk-11-jdk
+
+COPY scripts/get_depot_tools.sh /root/scripts/
+RUN /root/scripts/get_depot_tools.sh $SOURCE_DIR
+
+ENV PATH "$SOURCE_DIR/depot_tools:$PATH"
+
+ARG WEBRTC_COMMIT
+COPY scripts/prepare_webrtc.sh /root/scripts/
+RUN /root/scripts/prepare_webrtc.sh $SOURCE_DIR $WEBRTC_COMMIT
+
+RUN cd $SOURCE_DIR/webrtc/src \
+  && echo "target_os = [ 'android' ]" >> ../.gclient \
+  && gclient sync
+
+COPY scripts/install_webrtc_build_deps.sh /root/scripts/
+RUN /root/scripts/install_webrtc_build_deps.sh $SOURCE_DIR android
+
+COPY android/WebrtcBuildVersion.java $SOURCE_DIR/webrtc/src/sdk/android/api/org/webrtc/

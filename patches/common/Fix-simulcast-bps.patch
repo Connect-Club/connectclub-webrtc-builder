@@ -1,0 +1,37 @@
+diff --git a/media/engine/simulcast.cc b/media/engine/simulcast.cc
+index ebc6a240fe..41dfdfbe84 100644
+--- a/media/engine/simulcast.cc
++++ b/media/engine/simulcast.cc
+@@ -88,23 +88,17 @@ struct SimulcastFormat {
+ // simulcast layers at what bitrates (maximum, target, and minimum).
+ // Important!! Keep this table from high resolution to low resolution.
+ constexpr const SimulcastFormat kSimulcastFormats[] = {
+-    {1920, 1080, 3, webrtc::DataRate::KilobitsPerSec(5000),
+-     webrtc::DataRate::KilobitsPerSec(4000),
+-     webrtc::DataRate::KilobitsPerSec(800)},
+-    {1280, 720, 3, webrtc::DataRate::KilobitsPerSec(2500),
+-     webrtc::DataRate::KilobitsPerSec(2500),
+-     webrtc::DataRate::KilobitsPerSec(600)},
+-    {960, 540, 3, webrtc::DataRate::KilobitsPerSec(1200),
+-     webrtc::DataRate::KilobitsPerSec(1200),
+-     webrtc::DataRate::KilobitsPerSec(350)},
+-    {640, 360, 2, webrtc::DataRate::KilobitsPerSec(700),
+-     webrtc::DataRate::KilobitsPerSec(500),
++    {480, 480, 2, webrtc::DataRate::KilobitsPerSec(300),
++     webrtc::DataRate::KilobitsPerSec(200),
+      webrtc::DataRate::KilobitsPerSec(150)},
+-    {480, 270, 2, webrtc::DataRate::KilobitsPerSec(450),
+-     webrtc::DataRate::KilobitsPerSec(350),
++    {280, 280, 2, webrtc::DataRate::KilobitsPerSec(300),
++     webrtc::DataRate::KilobitsPerSec(200),
+      webrtc::DataRate::KilobitsPerSec(150)},
+-    {320, 180, 1, webrtc::DataRate::KilobitsPerSec(200),
+-     webrtc::DataRate::KilobitsPerSec(150),
++    {240, 240, 1, webrtc::DataRate::KilobitsPerSec(150),
++     webrtc::DataRate::KilobitsPerSec(100),
++     webrtc::DataRate::KilobitsPerSec(30)},
++    {140, 140, 1, webrtc::DataRate::KilobitsPerSec(150),
++     webrtc::DataRate::KilobitsPerSec(100),
+      webrtc::DataRate::KilobitsPerSec(30)},
+     // As the resolution goes down, interpolate the target and max bitrates down
+     // towards zero. The min bitrate is still limited at 30 kbps and the target
